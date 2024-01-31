@@ -20,7 +20,7 @@ send an email to a different set of email addresses.
 	# Export the file
         ./address_sync.pl --config library_config.conf
 	# import
-	./address_sync.pl --config library_config.conf --import /path/to/file
+	./address_sync.pl --config library_config.conf --import
 
 ## Command line options
 

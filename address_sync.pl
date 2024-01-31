@@ -25,7 +25,7 @@ our %importFileColMap = ();
 our %correctedColMap = ();
 our $dbtable;
 our $baseArchiveFolder;
-our $importFile;
+our $importFlag;
 
 my $logFile;
 my %fileParsingReport = ();
@@ -43,36 +43,35 @@ our %addressComparison =
 GetOptions (
     "xmlconfig=s" => \$xmlconf,
     "config=s"    => \$configFile,
-    "import=s" => \$importFile,
+    "import" => \$importFlag,
     "debug" => \$debug
 ) or printHelp();
 
 checkCMDArgs();
-
+   
+log_write( " ---------------- Script Starting ---------------- ", 1 );
+    
 fillColMaps();
 
 setupSchema();
 
-generateExport() if(!$importFile);
+generateExport() if(!$importFlag);
 
-import() if($importFile);
-
+import() if($importFlag);
 
 log_write( " ---------------- Script End ---------------- ", 1 );
+
 close($log);
 
 sub import
 {
-    if(!-e $importFile)
-    {
-        print "Import file does not exist: $importFile\n";
-        exit;
-    }
-    loadImportFile($importFile);
+    my @files = @{getFiles($conf{'importpath'})};
+    loadImportFile($_) foreach(@files);
 
     # filter rows where the incoming data is out dated compared to production columns
     filterProductionChanged();
-    
+    importUpgradedAddresses();
+    reportImportResults();
 }
 
 sub generateExport
@@ -145,7 +144,7 @@ sub getAddressChunk
         my $col = $_;
         $query .= 'id "address_id",'."\n" if($col eq 'address_id');
         $query .= '(CASE WHEN ' . $col . ' IS NULL THEN \'NULL\' ELSE '.
-                  'regexp_replace(' . $col . ' ,$$\t$$, $$$$ ,$$g$$) '.
+                  'REGEXP_REPLACE(' . $col . ' ,$$\t$$, $$$$ ,$$g$$) '.
                   'END) "' . $col . '",' . "\n"
             if($col ne 'address_id');
 
@@ -153,7 +152,7 @@ sub getAddressChunk
     # remove trailing newline character and comma
     $query = substr($query,0,-2);
     $query .= "\nFROM actor.usr_address";
-    $query .= "\nwhere id in( $pgArray )";
+    $query .= "\nWHERE id IN( $pgArray )";
     log_write($query) if $debug;
     return dbhandler_query($query,0,1);
 }
@@ -168,10 +167,10 @@ sub getAddressIDs
     SELECT aua.id
     FROM
     actor.usr_address aua
-    join actor.usr au on(au.id=aua.usr)
+    JOIN actor.usr au ON(au.id=aua.usr)
     WHERE
     NOT au.deleted AND
-    au.home_ou in( $pgLibs )
+    au.home_ou IN( $pgLibs )
     GROUP BY 1
     ORDER BY 1";
     my @results = @{ getDataChunk( $query, $limit, $offset ) };
@@ -212,8 +211,8 @@ sub loadImportFile
     my $path;
     my @sp = split('/',$file);       
     $path=substr($file,0,( (length(@sp[$#sp]))*-1) );
-    my $bareFilename =  pop @sp;
-    $fileParsingReport{"*** $bareFilename ***"} = "\r\n";
+    my $bareImportFilename =  pop @sp;
+    $fileParsingReport{"*** $bareImportFilename ***"} = "\r\n";
 
     checkFileReady($file);
     my $csv = Text::CSV->new ( { sep_char => "\t" } )
@@ -254,7 +253,7 @@ sub loadImportFile
         if(scalar @rowarray != $sanitycheckcolumnnums )
         {
             log_write("Error parsing line $rownum\nIncorrect number of columns: ". scalar @rowarray);
-            $fileParsingReport{"*** $bareFilename ***"} .= "Error parsing line $rownum\nIncorrect number of columns: ". scalar @rowarray . "\r\n";
+            $fileParsingReport{"*** $bareImportFilename ***"} .= "Error parsing line $rownum\nIncorrect number of columns: ". scalar @rowarray . "\r\n";
         }
         else
         {
@@ -306,7 +305,7 @@ sub loadImportFile
             $queryByHand = substr($queryByHand,0,-2);
             log_write($queryByHand);
             # print ("Importing $success\n");
-            $fileParsingReport{"*** $bareFilename ***"} .= "Importing $accumulatedTotal / $rownum\r\n";
+            $fileParsingReport{"*** $bareImportFilename ***"} .= "Importing $accumulatedTotal / $rownum\r\n";
             log_write("Importing $accumulatedTotal / $rownum");
             dbhandler_update($queryInserts,\@queryValues);
             $success = 0;
@@ -333,12 +332,12 @@ sub loadImportFile
 
     close $fh;
     $accumulatedTotal+=$success;
-    $fileParsingReport{"*** $bareFilename ***"} .= "\r\nImporting $accumulatedTotal / $rownum"  if $success;
+    $fileParsingReport{"*** $bareImportFilename ***"} .= "\r\nImporting $accumulatedTotal / $rownum"  if $success;
     log_write("Importing $accumulatedTotal / $rownum") if $success;
     
     dbhandler_update($queryInserts,\@queryValues) if $success;
     
-    my $query = "UPDATE $dbtable set file_name = \$data\$$bareFilename\$data\$ WHERE file_name is null";
+    my $query = "UPDATE $dbtable SET file_name = \$data\$$bareImportFilename\$data\$ WHERE file_name IS NULL";
     log_write($query) if $accumulatedTotal;
     dbhandler_update($query) if $accumulatedTotal;
 
@@ -350,7 +349,7 @@ sub loadImportFile
     # convert "NULL" to real database null
     if($accumulatedTotal)
     {
-        my $queryBase = "UPDATE $dbtable set ";
+        my $queryBase = "UPDATE $dbtable SET ";
         while ( (my $key, my $value) = each(%importFileColMap) )
         {
             my $query = $queryBase . $value . " = null where $value = 'NULL' AND not dealt_with";
@@ -358,18 +357,19 @@ sub loadImportFile
             dbhandler_update($query);
         }
     }
-
+    unlink $file;
 }
 
 sub filterProductionChanged
 {
     my $queryBase = "
     UPDATE $dbtable synctable
-    SET dealt_with = true,
+    SET
     error_message = \$\$Production address !!column!! changed\$\$
     FROM
     actor.usr_address aua
     WHERE
+    NOT dealt_with AND
     aua.id=synctable.address_id::bigint AND
     ";
     foreach(@ogColMapOrder)
@@ -378,11 +378,150 @@ sub filterProductionChanged
         if( ($_ ne 'address_id') && ($_ ne 'valid') )
         {
             $query =~ s/!!column!!/$_/g;
-            $query .= "coalesce(synctable.$_, '') != coalesce(aua.$_, '')";
+            $query .= "BTRIM(COALESCE(synctable.$_, '')) != BTRIM(COALESCE(aua.$_, ''))";
             log_write($query);
             dbhandler_update($query);
         }
     }
+}
+
+sub importUpgradedAddresses
+{
+    while ( (my $originalCol, my $correctedCol) = each(%addressComparison) )
+    {
+        my $query = "
+        SELECT id FROM $dbtable WHERE NOT dealt_with AND error_message IS NULL
+        AND
+        ";
+        $query .= "BTRIM(COALESCE($originalCol, '')) != BTRIM(COALESCE($correctedCol, ''))
+        ORDER BY 1";
+        log_write($query);
+        my @ids = @{dbhandler_query($query)};
+        updateProductionAddressColumn($_->[0], $originalCol, $correctedCol) foreach(@ids);
+    }
+}
+
+sub updateProductionAddressColumn
+{
+    my $stagingTableID = shift;
+    my $productionCol = shift;
+    my $localCol = shift;
+    my $query = "
+    UPDATE actor.usr_address aua
+    SET $productionCol = synctable.$localCol
+    FROM
+    $dbtable synctable
+    WHERE
+    synctable.id = \$1 AND
+    aua.id=synctable.address_id::bigint
+    ";
+    my @vars = ($stagingTableID);
+    log_write($query);
+    if( dbhandler_update($query, \@vars) )
+    {
+       $query = "
+       UPDATE $dbtable synctable
+       SET imported = true
+       WHERE
+       id = \$1";
+       dbhandler_update($query, \@vars);
+    }
+    else
+    {
+        $query = "
+        UPDATE $dbtable synctable
+        SET
+        imported = false,
+        error_message = \$\$error updating production $productionCol\$\$
+        WHERE
+        id = \$1";
+        dbhandler_update($query, \@vars);
+        return 0;
+    }
+    return 1;
+}
+
+sub reportImportResults
+{
+    my %reporting = ();
+    $query = "select count(*) from $dbtable where not dealt_with";
+    @results = @{dbhandler_query($query)};
+    $reporting{"Total Lines"} = $results[0][0] || 0;
+
+    $query = "SELECT (CASE WHEN imported THEN 'Success' ELSE 'Failed' END) , count(*) FROM $dbtable WHERE NOT dealt_with GROUP BY 1 ORDER BY 1";
+    @results = @{dbhandler_query($query)};
+    $reporting{"*** Success Breakdown ***"} = "\r\n";
+    foreach(@results)
+    {
+        my @row = @{$_};
+        $reporting{"*** Success Breakdown ***"} .= @row[0]."   ".@row[1]."\r\n";
+    }
+
+    my $errored = "";
+    $reporting{"Total lines with errors"} = 0;
+    $query = "SELECT address_id, error_message FROM $dbtable WHERE NOT dealt_with AND error_message IS NOT NULL AND error_message!=\$\$\$\$";
+    @results = @{dbhandler_query($query)};
+    foreach(@results)
+    {
+        my @row = @{$_};
+        $errored.="( " . @row[0] . " ) ERROR = '".@row[1]."\n";
+        $reporting{"Total with errors"}++;
+    }
+    my $processedFileNames = "";
+    my $fileCount = 0;
+    $query = "SELECT DISTINCT file_name FROM $dbtable WHERE NOT dealt_with";
+    @results = @{dbhandler_query($query)};
+    foreach(@results)
+    {
+        my @row = @{$_};
+        $processedFileNames .= @row[0] . "\r\n";
+        $fileCount++;
+    }
+
+    # Finally, mark all of the rows dealt_with for next execution to ignore
+    # Closing these rows off before* the email gets sent, so that if the email
+    # doesn't work for some reason, these rows have been marked off
+    markFinished();
+
+    my $body = "
+    Dear staff,
+
+    Your address file(s) has been processed.
+
+    Filename(s):
+    $processedFileNames\r\n\r\nSummary:\r\n\r\n";
+
+    while ( (my $key, my $value) = each(%fileParsingReport) )
+    {
+        $body.=$key.": ".$value;
+    }
+    $body.="\r\n\r\n";
+
+    my $lastReport = "";
+    while ( (my $key, my $value) = each(%reporting) )
+    {
+        $body.=$key.": ".$value."\n" if !($key =~ m/\*/g);
+        $lastReport .=$key.": ".$value."\n" if ($key =~ m/\*/g);
+    }
+    $body.="\r\n$lastReport";
+
+    $body.="\r\n\r\nErrored records:
+    $errored" if $reporting{"Total with errors"} > 0;
+
+    $body.="\r\n\r\n-MOBIUS Perl Squad-";
+
+    my $subject = trim( ($conf{'importemailsubjectline'} ? $conf{'importemailsubjectline'} : 'address import results') );
+    my @tolist = ( $conf{"alwaysemail"} );
+    my $email;
+    $email = email_setup( $conf{"fromemail"}, \@tolist, 0, 1);
+    email_send( $email,  "Evergreen Utility - " . $subject . " - $fileCount file(s)", $body );
+}
+
+sub markFinished
+{
+    my $query = "UPDATE $dbtable SET dealt_with = true WHERE NOT dealt_with";
+    log_write($query);
+    dbhandler_update($query);
 }
 
 sub getFiles
@@ -412,7 +551,7 @@ sub checkFileReady
     }
     while (!(open (inputfile, '< '. $file)) && $trys<100)
     {
-        print "Trying again attempt $trys\n";
+        print "Trying again, attempt $trys\n";
         $trys++;
         sleep(1);
     }
@@ -455,7 +594,7 @@ sub setupSchema
         $query.="
         file_name text,
         imported boolean default false,
-        error_message text DEFAULT \$\$\$\$,        
+        error_message text,
         dealt_with boolean default false,
         insert_date timestamp with time zone NOT NULL DEFAULT now(),
         CONSTRAINT $schema"."_$tableName"."_id_pkey PRIMARY KEY (id)
@@ -509,8 +648,8 @@ sub checkCMDArgs
 
     my @reqs =
     (
-        "logfile", "scopedlibs", "ftplogin",
-        "ftppass", "ftphost", "remote_directory", "emailsubjectline",
+        "logfile", "scopedlibs", "importpath", "ftplogin",
+        "ftppass", "ftphost", "remote_directory", "importemailsubjectline", "exportemailsubjectline",
         "archive", "transfermethod"
     );
     my @missing = ();
@@ -563,8 +702,6 @@ sub log_init
     open( $log, '> ' . $conf{"logfile"} )
       or die "Cannot write to: " . $conf{"logfile"};
     binmode( $log, ":utf8" );
-    
-    log_write( " ---------------- Script Starting ---------------- ", 1 );
 }
 
 sub log_addLogLine
@@ -730,7 +867,7 @@ sub send_sftp
 
     foreach my $file (@files)
     {
-        my $dest = $remotedir . "/" . getBareFileName($file);
+        my $dest = $remotedir . "/" . getBareFilename($file);
         log_write( "Sending file $file -> $dest", 1 );
         $sftp->put( $file, $dest )
           or return "Sending file $file failed";
@@ -948,7 +1085,7 @@ sub email_setupFinalToList
     return $email;
 }
 
-sub getBareFileName
+sub getBareFilename
 {
     my $fullFile = shift;
     my @s        = split( /\//, $fullFile );

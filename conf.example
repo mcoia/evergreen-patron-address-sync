@@ -5,6 +5,11 @@ dbtable = mymig.address_sync
 # Path to archive output files
 archive = /path/to/archive
 
+# import folder
+# Path to find files waiting for import
+# All files in this folder will be attempted. Make sure it's clean
+# Once imported, the file will be deleted
+importpath = /path/to/address_sync/import
 # This needs to match actor.org_unit.shortname
 # This is how the query gets only data for that system/branch
 # comma separated list of branch/system shortnames, case insensitive
@@ -34,7 +39,10 @@ ftplogin = remotelogin
 ftppass = remotepass
 remote_directory = /remote/path
 
-emailsubjectline = address sync export results
+exportemailsubjectline = address sync export results
+
+importemailsubjectline = address sync import results
+
 
 # only 1 email address for alwaysemail
 alwaysemail = noreply@example.com
