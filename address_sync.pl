@@ -12,7 +12,7 @@ use DateTime::Span;
 use Getopt::Long;
 use XML::Simple;
 use Email::MIME;
-
+use Net::SFTP;
 
 my $xmlconf = "/openils/conf/opensrf.xml";
 our $log;
@@ -26,11 +26,12 @@ our %correctedColMap = ();
 our $dbtable;
 our $baseArchiveFolder;
 our $importFlag;
+our $testFTP;
 
 my $logFile;
 my %fileParsingReport = ();
 
-our @ogColMapOrder = ('address_id', 'address_type', 'street1', 'street2', 'city', 'county', 'state', 'post_code','valid');
+our @ogColMapOrder = ('address_id', 'address_type', 'street1', 'street2', 'city', 'county', 'state', 'post_code', 'valid');
 our @correctedColMapOrder = ('marStreet1', 'marStreet2', 'marCity', 'marPost_Code', 'matching_score', 'distance');
 our %addressComparison =
 (
@@ -44,6 +45,7 @@ GetOptions (
     "xmlconfig=s" => \$xmlconf,
     "config=s"    => \$configFile,
     "import" => \$importFlag,
+    "testftp" => \$testFTP,
     "debug" => \$debug
 ) or printHelp();
 
@@ -51,9 +53,13 @@ checkCMDArgs();
    
 log_write( " ---------------- Script Starting ---------------- ", 1 );
     
+runTestFTP() if($testFTP);
+
 fillColMaps();
 
 setupSchema();
+
+cleanDatabase();
 
 generateExport() if(!$importFlag);
 
@@ -62,6 +68,20 @@ import() if($importFlag);
 log_write( " ---------------- Script End ---------------- ", 1 );
 
 close($log);
+
+
+sub runTestFTP
+{
+    `touch testfile.txt`;
+
+    my @files = ('testfile.txt');
+
+    send_sftp($conf{'ftphost'}, $conf{'ftplogin'}, $conf{'ftppass'}, $conf{'remote_directory'}, \@files);
+
+    unlink 'testfile.txt';
+
+    exit;
+}
 
 sub import
 {
@@ -116,6 +136,12 @@ sub generateExport
     }
     close($fileHandle);
     print "$count record(s) written to: $file\n";
+    if($count > 0 && $conf{'transfermethod'} eq 'sftp')
+    {
+        my @files = ($file);
+        send_sftp($conf{'ftphost'}, $conf{'ftplogin'}, $conf{'ftppass'}, $conf{'remote_directory'}, \@files);
+        undef @files;
+    }
 }
 
 sub writeData
@@ -144,7 +170,7 @@ sub getAddressChunk
         my $col = $_;
         $query .= 'id "address_id",'."\n" if($col eq 'address_id');
         $query .= '(CASE WHEN ' . $col . ' IS NULL THEN \'NULL\' ELSE '.
-                  'REGEXP_REPLACE(' . $col . ' ,$$\t$$, $$$$ ,$$g$$) '.
+                  'REGEXP_REPLACE(' . $col . '::TEXT ,$$\t$$::TEXT, $$$$::TEXT ,$$g$$::TEXT) '.
                   'END) "' . $col . '",' . "\n"
             if($col ne 'address_id');
 
@@ -170,6 +196,7 @@ sub getAddressIDs
     JOIN actor.usr au ON(au.id=aua.usr)
     WHERE
     NOT au.deleted AND
+    au.active AND
     au.home_ou IN( $pgLibs )
     GROUP BY 1
     ORDER BY 1";
@@ -315,7 +342,7 @@ sub loadImportFile
             $queryByHand = $queryByHandHead;
         }
     }
-    
+
     $queryInserts = substr($queryInserts,0,-2) if $success;
     $queryByHand = substr($queryByHand,0,-2) if $success;
     
@@ -392,8 +419,7 @@ sub importUpgradedAddresses
         my $query = "
         SELECT id FROM $dbtable WHERE NOT dealt_with AND error_message IS NULL
         AND
-        ";
-        $query .= "BTRIM(COALESCE($originalCol, '')) != BTRIM(COALESCE($correctedCol, ''))
+        BTRIM(COALESCE($originalCol, '')) != BTRIM(COALESCE($correctedCol, ''))
         ORDER BY 1";
         log_write($query);
         my @ids = @{dbhandler_query($query)};
@@ -584,7 +610,7 @@ sub setupSchema
             $query = "CREATE SCHEMA $schema";
             dbhandler_update($query);
         }
-		
+
 		$query = "CREATE TABLE $dbtable
 		(
 		id bigserial NOT NULL,
@@ -603,6 +629,19 @@ sub setupSchema
         log_write($query);
 		dbhandler_update($query);
 	}
+}
+
+sub cleanDatabase
+{
+    $query = "
+    DELETE FROM $dbtable
+    WHERE
+    insert_date < now() - '1 year'::INTERVAL";
+    my @vars = ();
+    log_write($query);
+    dbhandler_update($query, \@vars);
+    undef @vars;
+    return 0;
 }
 
 sub printHelp
@@ -1145,18 +1184,22 @@ sub chooseNewFileName
 
     $path = $path . '/' if ( substr( $path, length($path) - 1, 1 ) ne '/' );
 
-    if ( -d $path ) {
+    if ( -d $path )
+    {
         my $num = "";
         $ret = $path . $seed . $num . '.' . $ext;
-        while ( -e $ret ) {
-            if ( $num eq "" ) {
+        while ( -e $ret )
+        {
+            if ( $num eq "" )
+            {
                 $num = -1;
             }
             $num++;
             $ret = $path . $seed . $num . '.' . $ext;
         }
     }
-    else {
+    else
+    {
         $ret = 0;
     }
 
@@ -1205,10 +1248,12 @@ sub getOrgUnits
     order by 1";
     log_write($query) if $debug;
     my @results = @{ dbhandler_query($query) };
-    foreach (@results) {
+    foreach (@results)
+    {
         my @row = @{$_};
         push( @ret, @row[0] );
-        if ( $conf{"include_org_descendants"} ) {
+        if ( $conf{"include_org_descendants"} )
+        {
             my @des = @{ getOrgDescendants( @row[0] ) };
             push( @ret, @des );
         }
@@ -1239,7 +1284,8 @@ sub getOrgDescendants
     log_write($query) if $debug;
 
     my @results = @{ dbhandler_query($query) };
-    foreach (@results) {
+    foreach (@results)
+    {
         my @row = @{$_};
         push( @ret, @row[0] );
     }

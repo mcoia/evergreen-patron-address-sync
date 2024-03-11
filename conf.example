@@ -23,10 +23,6 @@ include_org_descendants = 1
 
 filenameprefix = sys1
 
-# If enabled, the output file(s) will be tar.gz
-# uncomment to enable
-# compressoutput = 1
-
 #
 # SFTP Server to drop off
 #
