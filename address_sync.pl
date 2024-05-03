@@ -236,9 +236,9 @@ sub loadImportFile
     my $file = shift;
     print "Processing $file\n";
     my $path;
-    my @sp = split('/',$file);       
-    $path=substr($file,0,( (length(@sp[$#sp]))*-1) );
-    my $bareImportFilename =  pop @sp;
+    my @sp = split('/',$file);
+    $path = substr($file,0,( (length(@sp[$#sp]))*-1) );
+    my $bareImportFilename = pop @sp;
     $fileParsingReport{"*** $bareImportFilename ***"} = "\r\n";
 
     checkFileReady($file);
@@ -379,7 +379,12 @@ sub loadImportFile
         my $queryBase = "UPDATE $dbtable SET ";
         while ( (my $key, my $value) = each(%importFileColMap) )
         {
-            my $query = $queryBase . $value . " = null where $value = 'NULL' AND not dealt_with";
+            # the word "null" needs to be real DB null
+            my $query = $queryBase . $value . " = null WHERE BTRIM(UPPER( $value )) = 'NULL' AND NOT dealt_with";
+            log_write($query);
+            dbhandler_update($query);
+            # empty strings need to be null
+            my $query = $queryBase . $value . " = null WHERE BTRIM( $value ) = '' AND NOT dealt_with";
             log_write($query);
             dbhandler_update($query);
         }
@@ -599,11 +604,11 @@ sub setupSchema
 
     my $schema = @schema_table[0];
     my $tableName = @schema_table[1];
-	my $query = "select * from INFORMATION_SCHEMA.COLUMNS where table_name = '$tableName' and table_schema='$schema'";
+	my $query = "SELECT * FROM information_schema.columns WHERE table_name = '$tableName' AND table_schema='$schema'";
 	my @results = @{dbhandler_query($query)};
 	if($#results==-1)
 	{
-        $query = "select schema_name from information_schema.schemata where schema_name='$schema'";
+        $query = "SELECT schema_name FROM information_schema.schemata WHERE schema_name='$schema'";
         my @results = @{dbhandler_query($query)};
         if($#results <  0)
         {
@@ -628,6 +633,12 @@ sub setupSchema
 
         log_write($query);
 		dbhandler_update($query);
+
+        $query = "CREATE INDEX $dbtable"."_dealt_with_idx ON $schema.$dbtable (dealt_with);";
+
+        log_write($query);
+		dbhandler_update($query);
+
 	}
 }
 
