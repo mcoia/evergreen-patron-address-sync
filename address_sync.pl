@@ -509,43 +509,45 @@ sub reportImportResults
         $fileCount++;
     }
 
-    # Finally, mark all of the rows dealt_with for next execution to ignore
-    # Closing these rows off before* the email gets sent, so that if the email
-    # doesn't work for some reason, these rows have been marked off
-    markFinished();
-
-    my $body = "
-    Dear staff,
-
-    Your address file(s) has been processed.
-
-    Filename(s):
-    $processedFileNames\r\n\r\nSummary:\r\n\r\n";
-
-    while ( (my $key, my $value) = each(%fileParsingReport) )
+    if($fileCount > 0)
     {
-        $body.=$key.": ".$value;
+        # Finally, mark all of the rows dealt_with for next execution to ignore
+        # Closing these rows off before* the email gets sent, so that if the email
+        # doesn't work for some reason, these rows have been marked off
+        markFinished();
+
+        my $body = "
+Dear staff,
+
+Your address file(s) has been processed.
+
+Filename(s):
+$processedFileNames\r\n\r\nSummary:\r\n\r\n";
+
+        while ( (my $key, my $value) = each(%fileParsingReport) )
+        {
+            $body.=$key.": ".$value;
+        }
+        $body.="\r\n\r\n";
+
+        my $lastReport = "";
+        while ( (my $key, my $value) = each(%reporting) )
+        {
+            $body.=$key.": ".$value."\n" if !($key =~ m/\*/g);
+            $lastReport .=$key.": ".$value."\n" if ($key =~ m/\*/g);
+        }
+        $body.="\r\n$lastReport";
+
+        $body.="\r\n\r\nErrored records:\r\n$errored" if $reporting{"Total with errors"} > 0;
+
+        $body.="\r\n\r\n-MOBIUS Perl Squad-";
+
+        my $subject = trim( ($conf{'importemailsubjectline'} ? $conf{'importemailsubjectline'} : 'address import results') );
+        my @tolist = ( $conf{"alwaysemail"} );
+        my $email;
+        $email = email_setup( $conf{"fromemail"}, \@tolist, 0, 1);
+        email_send( $email,  "Evergreen Utility - " . $subject . " - $fileCount file(s)", $body );
     }
-    $body.="\r\n\r\n";
-
-    my $lastReport = "";
-    while ( (my $key, my $value) = each(%reporting) )
-    {
-        $body.=$key.": ".$value."\n" if !($key =~ m/\*/g);
-        $lastReport .=$key.": ".$value."\n" if ($key =~ m/\*/g);
-    }
-    $body.="\r\n$lastReport";
-
-    $body.="\r\n\r\nErrored records:
-    $errored" if $reporting{"Total with errors"} > 0;
-
-    $body.="\r\n\r\n-MOBIUS Perl Squad-";
-
-    my $subject = trim( ($conf{'importemailsubjectline'} ? $conf{'importemailsubjectline'} : 'address import results') );
-    my @tolist = ( $conf{"alwaysemail"} );
-    my $email;
-    $email = email_setup( $conf{"fromemail"}, \@tolist, 0, 1);
-    email_send( $email,  "Evergreen Utility - " . $subject . " - $fileCount file(s)", $body );
 }
 
 sub markFinished
@@ -1069,32 +1071,6 @@ sub email_deDupeEmailArray
     }
 
     return \@ret;
-}
-
-sub email_body
-{
-    my $ret = <<'splitter';
-Dear staff,
-
-This is a LibraryIQ Evergreen export.
-
-This was a *!!jobtype!!* extraction. We gathered data starting from this date: !!startdate!!
-
-Results:
-
-!!filecount!! file(s)
-
-!!filedetails!!
-
-We transferred the data to:
-
-!!trasnferhost!!!!remotedir!!
-
-Yours Truely,
-The Evergreen Server
-
-splitter
-
 }
 
 sub email_setupFinalToList
